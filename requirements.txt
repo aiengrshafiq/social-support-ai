@@ -1,11 +1,8 @@
-# requirements.txt (V1.1 - Robust & Lean)
-
 # --- Core Framework ---
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
 streamlit==1.38.0
 pydantic==2.9.2
-pydantic-settings==2.3.4
 python-dotenv==1.0.1
 
 # --- Databases ---
@@ -17,13 +14,15 @@ qdrant-client==1.9.1
 neo4j==5.25.0
 redis==5.0.8
 
-# --- AI / Agents ---
-langchain==0.2.16
-langchain-community==0.2.16
+# --- Agents / Orchestration (no LangChain package, just core + LangGraph) ---
+langchain-core==0.2.39
 langgraph==0.2.35
-langchain-ollama==0.1.2
+
+# --- Local LLM client (talks to your Ollama container) ---
+ollama==0.6.0
+
+# --- Observability ---
 langfuse==2.50.2
-ollama==0.2.1  # <-- ADDED: Direct Ollama client
 
 # --- ML & Parsing (Lean) ---
 scikit-learn==1.4.2
