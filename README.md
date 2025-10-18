@@ -1,23 +1,4 @@
-You are absolutely right. The formatting on GitHub is everything. The issue you're seeing is because the content was likely pasted into a file that wasn't saved with a `.md` extension, or the pasting process lost the Markdown formatting.
 
-Here is the full, professionally formatted code for your `README.md`. I've added badges for visual appeal and a table of contents for easy navigation.
-
------
-
-### **Instructions**
-
-1.  **Open your project** in a code editor like VS Code.
-2.  In the **root directory** of your project (`social-support-ai/`), create a new file named **`README.md`**. Make sure the extension is `.md`.
-3.  **Copy the entire content** from the code block below.
-4.  **Paste it** into your new `README.md` file.
-5.  **Save the file**.
-6.  **Commit and push** this new file to your GitHub repository.
-
-GitHub will automatically detect the `README.md` file and render it beautifully on your repository's main page.
-
------
-
-### File: `README.md`
 
 ````markdown
 # Social Support AI Workflow Automation
