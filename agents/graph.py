@@ -1,6 +1,7 @@
 # agents/graph.py
 import os
 import json
+import httpx
 from langgraph.graph import StateGraph, END
 from pymongo import MongoClient
 from langfuse import Langfuse # Import Langfuse client
@@ -416,6 +417,81 @@ def run_data_validation(state: AgentState) -> AgentState:
         # Store fully validated data, clear error
         return {**state, "validated_data": validated_data_dict, "error_message": None}
 
+
+
+# --- Eligibility Check Agent Node (NEW) ---
+@observe()
+async def check_eligibility(state: AgentState) -> AgentState:
+    """
+    Prepares features and calls the ML service to get an eligibility prediction.
+    """
+    print(f"--- Running Eligibility Check for App ID: {state['application_id']} ---")
+    application_id = state["application_id"]
+    validated_data = state.get("validated_data")
+    errors = []
+
+    current_span = langfuse_context.get_current_span()
+    if current_span:
+        current_span.input({"application_id": application_id, "validated_data_keys": list(validated_data.keys()) if validated_data else []})
+
+    if not validated_data:
+        error_msg = "Eligibility check failed: No validated data found."
+        print(error_msg)
+        if current_span:
+            current_span.level="ERROR"; current_span.status_message = error_msg
+            current_span.output({"status": "failed", "errors": [error_msg]})
+        return {**state, "error_message": error_msg}
+
+    # --- 1. Prepare Features ---
+    # Extract features needed by the model from validated_data
+    # Use default values or handle missing data appropriately
+    features = {
+        "income": validated_data.get("total_income", 0.0), # Default to 0 if missing
+        "family_size": len(validated_data.get("family_members", [])) + 1, # Applicant + members
+        # Add other features based on EXPECTED_FEATURES in serve_model.py
+    }
+    print(f"Prepared features: {features}")
+
+    # --- 2. Call ML Service ---
+    ml_service_url = "http://ml_service:8001/predict" # Use Docker service name
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(ml_service_url, json=features)
+            response.raise_for_status() # Raise exception for bad status codes (4xx or 5xx)
+            prediction_result = response.json()
+            print(f"ML Service Response: {prediction_result}")
+
+            eligibility_decision = prediction_result.get("decision", "Error")
+            eligibility_score = prediction_result.get("probability")
+
+            if current_span:
+                 current_span.output({"status": "success", "prediction": prediction_result})
+
+            # Update state with decision and score
+            return {
+                **state,
+                "eligibility_decision": eligibility_decision,
+                "eligibility_score": eligibility_score,
+                "error_message": None # Clear previous errors if check is successful
+            }
+
+    except httpx.RequestError as e:
+        error_msg = f"Error calling ML service: {e}"
+        print(error_msg)
+        errors.append(error_msg)
+    except Exception as e:
+        error_msg = f"Error processing ML service response: {e}"
+        print(error_msg)
+        errors.append(error_msg)
+
+    # --- Handle errors ---
+    final_error_message = "Eligibility check failed:\n" + "\n".join(errors)
+    if current_span:
+        current_span.level="ERROR"; current_span.status_message = "Eligibility Check Failed"
+        current_span.output({"status": "failed", "errors": errors})
+    current_error = state.get("error_message")
+    return {**state, "error_message": f"{current_error}\n{final_error_message}" if current_error else final_error_message}
+
 # --- Update Workflow Graph Definition ---
 workflow = StateGraph(AgentState)
 
@@ -423,6 +499,7 @@ workflow = StateGraph(AgentState)
 workflow.add_node("extract_data", run_data_extraction)
 workflow.add_node("validate_data", run_data_validation) # Add the new node
 workflow.add_node("persist_data", persist_data)
+workflow.add_node("check_eligibility", check_eligibility) # Add eligibility check node
 
 # Define the entry point
 workflow.set_entry_point("extract_data")
@@ -471,10 +548,19 @@ workflow.add_conditional_edges(
     }
 )
 
+# Edge after persistence -> Go to eligibility check
+workflow.add_conditional_edges(
+    "persist_data",
+    lambda state: "error" if state.get("error_message") else "success",
+    {
+        "success": "check_eligibility", # <-- Go to eligibility on success
+        "error": END # End if persistence failed
+    }
+)
 
 # Edge after persistence
 # For now, end the workflow after attempting persistence
-workflow.add_edge("persist_data", END)
+workflow.add_edge("check_eligibility", END)
 
 # Compile the graph
 app_graph = workflow.compile()

@@ -32,6 +32,11 @@ pandas==2.2.2
 pdfplumber==0.11.4
 pillow==10.4.0
 sentence-transformers==2.7.0
+joblib==1.4.2 # For saving/loading sklearn models
+
+
 
 # --- Utility ---
 python-multipart==0.0.9
+httpx==0.27.0
+numpy

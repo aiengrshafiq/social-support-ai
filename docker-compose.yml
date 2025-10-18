@@ -76,6 +76,21 @@ services:
     #           count: 1
     #           capabilities: [gpu]
 
+   # --- ADD THE ML SERVICE ---
+  ml_service:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.ml
+    container_name: eligibility_ml_service
+    ports:
+      - "8001:8001" # Expose on host port 8001
+    volumes:
+      # Mount the ml directory if you want live updates during dev,
+      # otherwise the Dockerfile COPY is sufficient for production.
+       - ./ml:/app/ml # Optional: for live reload during development
+    restart: unless-stopped
+  # --- END ML SERVICE ---
+
   # 8. Our FastAPI App (we'll build this next)
   api:
     build:
@@ -92,6 +107,7 @@ services:
       - neo4j
       - redis
       - ollama
+      - ml_service
      
 
   # 9. Our Streamlit UI (we'll build this later)
