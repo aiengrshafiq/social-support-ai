@@ -72,8 +72,8 @@ graph TD
         API -- Session/Cache --> DB_REDIS(Redis @ :6379)
     end
 
-
-    Data Flow:
+```
+Data Flow:
 
 The Applicant interacts with the Streamlit App, providing details and uploading documents.
 
