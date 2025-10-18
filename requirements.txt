@@ -1,38 +1,35 @@
-# requirements.txt
+# requirements.txt (V1 - Lean Version)
 
 # --- Core Framework ---
 fastapi
 uvicorn[standard]
 streamlit
 pydantic
+pydantic-settings # Better for config
 python-dotenv
 
 # --- Databases ---
 sqlalchemy
-psycopg2-binary
-alembic       # For PostgreSQL migrations
-pymongo       # For MongoDB
-qdrant-client # For Qdrant
-neo4j         # For Neo4j
-redis         # For Redis
+psycopg2-binary  # Pre-compiled, fast
+alembic
+pymongo
+qdrant-client
+neo4j
+redis
 
 # --- AI / LangChain ---
 langchain
 langgraph
 langchain-community
 langchain-ollama
-langfuse      # For observability
+langfuse
+langchain-core
 
-# --- ML & Parsing ---
-scikit-learn
-pandas
-shap
-paddlepaddle-gpu # or paddlepaddle (CPU)
-paddleocr
-layoutparser
-pdfplumber    # Easier than PyPDF2 for table/text
-camelot-py[cv]
-opencv-python-headless
+# --- ML & Parsing (Lean) ---
+scikit-learn     # Still need for ML model
+pandas           # Still need for Excel
+pdfplumber       # Lightweight PDF reader
+pillow           # For image conversion
 
 # --- Utility ---
 python-multipart # For file uploads
