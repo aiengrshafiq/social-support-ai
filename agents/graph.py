@@ -80,17 +80,17 @@ def persist_data(state: AgentState) -> AgentState:
     applicant_id = state["applicant_id"]
     errors = []
 
-    current_span = langfuse_context.get_current_span()
-    if current_span:
-        current_span.input({"application_id": application_id, "validated_data_keys": list(validated_data.keys()) if validated_data else []})
+    
+    # if current_span:
+    #     current_span.input({"application_id": application_id, "validated_data_keys": list(validated_data.keys()) if validated_data else []})
 
     if not validated_data:
         error_msg = "Persistence failed: No validated data found."
         print(error_msg)
-        if current_span:
-            current_span.level="ERROR"
-            current_span.status_message = error_msg
-            current_span.output({"status": "failed", "errors": [error_msg]})
+        # if current_span:
+        #     current_span.level="ERROR"
+        #     current_span.status_message = error_msg
+        #     current_span.output({"status": "failed", "errors": [error_msg]})
         return {**state, "error_message": error_msg}
 
     # --- 1. Persist to PostgreSQL (Main Record) ---
@@ -205,10 +205,10 @@ def persist_data(state: AgentState) -> AgentState:
     if errors:
         final_message = "Persistence finished with errors:\n" + "\n".join(errors)
         print(final_message)
-        if current_span:
-            current_span.level="ERROR"
-            current_span.status_message = "Persistence Errors"
-            current_span.output({"status": "errors", "errors": errors})
+        # if current_span:
+        #     current_span.level="ERROR"
+        #     current_span.status_message = "Persistence Errors"
+        #     current_span.output({"status": "errors", "errors": errors})
         # Keep existing error message if validation failed, otherwise add persistence errors
         current_error = state.get("error_message")
         return {**state, "error_message": f"{current_error}\n{final_message}" if current_error else final_message}
@@ -258,12 +258,11 @@ def run_data_extraction(state: AgentState) -> AgentState:
     all_extracted_data = {}
     errors = []
 
-    # Get the current Langfuse trace/span context if available
-    current_span = langfuse_context.get_current_span()
+   
     
-    # Input metadata for Langfuse
-    if current_span:
-        current_span.input({"application_id": application_id, "files": list(uploaded_files.keys())})
+    # # Input metadata for Langfuse
+    # if current_span:
+    #     current_span.input({"application_id": application_id, "files": list(uploaded_files.keys())})
 
     for file_type, file_path in uploaded_files.items():
         if not os.path.exists(file_path):
@@ -355,7 +354,7 @@ def run_data_validation(state: AgentState) -> AgentState:
     extracted_data = state.get("extracted_data")
     validation_errors = []
 
-    current_span = langfuse_context.get_current_span()
+   
     if current_span:
         current_span.input({"application_id": application_id, "extracted_data_keys": list(extracted_data.keys()) if extracted_data else []})
 
@@ -430,7 +429,7 @@ async def check_eligibility(state: AgentState) -> AgentState:
     validated_data = state.get("validated_data")
     errors = []
 
-    current_span = langfuse_context.get_current_span()
+    
     if current_span:
         current_span.input({"application_id": application_id, "validated_data_keys": list(validated_data.keys()) if validated_data else []})
 
@@ -508,7 +507,7 @@ async def generate_recommendation(state: AgentState) -> AgentState:
     validated_data = state.get("validated_data", {}) # Get validated data, default to empty dict
     errors = []
 
-    current_span = langfuse_context.get_current_span()
+    
     if current_span:
         current_span.input({
             "application_id": application_id,
@@ -519,9 +518,9 @@ async def generate_recommendation(state: AgentState) -> AgentState:
     if not eligibility_decision:
         error_msg = "Recommendation failed: Eligibility decision not found in state."
         print(error_msg)
-        if current_span:
-            current_span.level="ERROR"; current_span.status_message = error_msg
-            current_span.output({"status": "failed", "errors": [error_msg]})
+        # if current_span:
+        #     current_span.level="ERROR"; current_span.status_message = error_msg
+        #     current_span.output({"status": "failed", "errors": [error_msg]})
         # Preserve previous errors if any
         current_error = state.get("error_message")
         return {**state, "error_message": f"{current_error}\n{error_msg}" if current_error else error_msg}
@@ -536,8 +535,8 @@ async def generate_recommendation(state: AgentState) -> AgentState:
     else: # Handle Review or other states if added later
          financial_recommendation = f"Your application (ID: {application_id}) requires further review. We will update you on the status soon."
          # For review cases, maybe skip economic enablement for now
-         if current_span:
-             current_span.output({"status": "review_needed", "recommendation": financial_recommendation})
+        #  if current_span:
+        #      current_span.output({"status": "review_needed", "recommendation": financial_recommendation})
          return {**state, "final_recommendation": financial_recommendation}
 
 
@@ -595,9 +594,9 @@ async def generate_recommendation(state: AgentState) -> AgentState:
     if errors:
         final_message = "Recommendation generation finished with errors:\n" + "\n".join(errors)
         print(final_message)
-        if current_span:
-            current_span.level="WARNING"; current_span.status_message = "Recommendation Errors (RAG)"
-            current_span.output({"status": "partial_success", "errors": errors, "recommendation": final_recommendation})
+        # if current_span:
+        #     current_span.level="WARNING"; current_span.status_message = "Recommendation Errors (RAG)"
+        #     current_span.output({"status": "partial_success", "errors": errors, "recommendation": final_recommendation})
         current_error = state.get("error_message")
         return {**state, "final_recommendation": final_recommendation, "error_message": f"{current_error}\n{final_message}" if current_error else final_message}
     else:

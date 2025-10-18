@@ -36,53 +36,41 @@ def get_db():
 
 # --- Function to run the graph in the background ---
 def run_graph_background(initial_state: AgentState):
-    """Invokes the LangGraph app asynchronously."""
-    print(f"Starting background graph execution for App ID: {initial_state['application_id']}")
-    
-    # --- Langfuse Trace ---
+    print(f"BG_TASK: Starting for App ID: {initial_state['application_id']}") # ADDED
     trace = get_langfuse_trace(initial_state['application_id'])
-    
-    # Configuration for the graph run, including the trace context
+    print(f"BG_TASK: Trace object created: {trace is not None}") # ADDED
+
     config = {}
     if trace:
-        config["configurable"] = {"trace": trace} # Pass trace object if available
-        
-    final_state = None
+        config["configurable"] = {"trace": trace}
 
+    final_state = None
     try:
-        # Stream events (good for debugging, optional for background task)
-        # for event in app_graph.stream(initial_state, config=config):
-        #     print(f"Graph Event: {event}")
-            
-        # Or just invoke and get the final state (simpler for background)
+        print("BG_TASK: Invoking app_graph...") # ADDED
         final_state = app_graph.invoke(initial_state, config=config)
-        print(f"Graph execution finished for App ID: {initial_state['application_id']}. Final state keys: {final_state.keys()}")
-        
-        # --- Update DB based on final state (Optional Here) ---
-        # You might update the application status in Postgres here based on final_state
-        # db = database.SessionLocal()
-        # try:
-        #    db_app = db.query(models.Application).filter(models.Application.id == initial_state['application_id']).first()
-        #    if db_app:
-        #        if final_state.get("error_message"):
-        #            db_app.status = models.ApplicationStatus.VALIDATION_FAILED # Or a new EXTRACTION_FAILED status
-        #        # Add more status updates based on graph progress
-        #        db.commit()
-        # finally:
-        #    db.close()
+        print(f"BG_TASK: Graph finished. Final state keys: {final_state.keys()}") # ADDED
 
     except Exception as e:
-        print(f"Error during graph execution for App ID {initial_state['application_id']}: {e}")
-        # Optionally update DB status to indicate failure
+        print(f"BG_TASK: ERROR during graph execution: {e}") # ADDED
+        import traceback
+        traceback.print_exc()
     finally:
-        # --- Ensure Langfuse trace is ended and client flushed ---
+        print("BG_TASK: Entering finally block...") # ADDED
         status_message = "completed" if final_state is not None else "error"
         if trace:
-            trace.update(output={"status": status_message})
-        # --- FLUSH THE IMPORTED CLIENT ---
-        if langfuse_client: # Check if client was initialized successfully
+            trace_output = {"status": status_message}
+            if final_state:
+                trace_output["final_state_keys"] = list(final_state.keys())
+            print(f"BG_TASK: Updating trace output: {trace_output}") # ADDED
+            trace.update(output=trace_output)
+
+        if langfuse_client:
+            print("BG_TASK: Flushing Langfuse client...") # ADDED
             langfuse_client.flush()
-            print("Langfuse client flushed.")
+            print("BG_TASK: Langfuse client flushed.") # This is the key message
+        else:
+            print("BG_TASK: Langfuse client not found, skipping flush.") # ADDED
+        print("BG_TASK: Exiting finally block.") # ADDED
 
 @router.post("/{application_id}/upload")
 # Add BackgroundTasks dependency
