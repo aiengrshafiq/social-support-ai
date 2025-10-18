@@ -1,0 +1,22 @@
+# docker/Dockerfile.streamlit
+
+# Use the same base image for consistency
+FROM python:3.11-slim
+
+# Set the working directory
+WORKDIR /app
+
+# Copy and install requirements
+COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy the rest of the application code
+COPY . .
+
+# Expose the Streamlit port
+EXPOSE 8501
+
+# The command to run your Streamlit app
+# This assumes your main streamlit file is at apps/streamlit_app/app.py
+CMD ["streamlit", "run", "apps/streamlit_app/app.py", "--server.port=8501", "--server.address=0.0.0.0"]

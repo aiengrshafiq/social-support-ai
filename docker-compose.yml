@@ -1,5 +1,5 @@
 # docker-compose.yml
-version: '3.9'
+# version: '3.9'
 
 services:
   # 1. App DB: PostgreSQL
@@ -58,38 +58,7 @@ services:
     ports:
       - "6379:6379"
 
-  # 6. Observability: Langfuse
-  langfuse-db:
-    image: postgres:16
-    container_name: langfuse_db
-    environment:
-      POSTGRES_USER: langfuse
-      POSTGRES_PASSWORD: langfuse
-      POSTGRES_DB: langfuse
-    volumes:
-      - langfuse_db_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U langfuse -d langfuse"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
   
-  langfuse-server:
-    image: ghcr.io/langfuse/langfuse:latest
-    container_name: langfuse_server
-    depends_on:
-      langfuse-db:
-        condition: service_healthy
-    ports:
-      - "3000:3000"
-    environment:
-      DATABASE_URL: postgresql://langfuse:langfuse@langfuse-db:5432/langfuse
-      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY}
-      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY}
-      NEXTAUTH_URL: http://localhost:3000
-      NEXTAUTH_SECRET: "somesecretstring" # Change this
-      TELEMETRY_ENABLED: "false"
-
   # 7. Model Hosting: Ollama
   ollama:
     image: ollama/ollama:latest
@@ -123,7 +92,7 @@ services:
       - neo4j
       - redis
       - ollama
-      - langfuse-server
+     
 
   # 9. Our Streamlit UI (we'll build this later)
   streamlit:
@@ -141,5 +110,4 @@ volumes:
   mongo_data:
   qdrant_data:
   neo4j_data:
-  langfuse_db_data:
   ollama_data:

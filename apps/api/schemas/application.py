@@ -1,26 +1,32 @@
 # apps/api/schemas/application.py
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, ConfigDict
 from typing import Optional
 
-class ApplicantCreate(BaseModel):
+class ApplicantBase(BaseModel):
     full_name: str
     email: EmailStr
     emirates_id: str
     phone_number: Optional[str] = None
 
-class ApplicantResponse(ApplicantCreate):
+class ApplicantCreate(ApplicantBase):
+    pass
+
+class ApplicantResponse(ApplicantBase):
     id: int
+    
+    # --- THIS IS THE FIX ---
+    model_config = ConfigDict(from_attributes=True)
 
-    class Config:
-        orm_mode = True
 
-class ApplicationCreate(BaseModel):
+class ApplicationBase(BaseModel):
     applicant_id: int
 
-class ApplicationResponse(BaseModel):
+class ApplicationCreate(ApplicationBase):
+    pass
+
+class ApplicationResponse(ApplicationBase):
     id: int
-    applicant_id: int
     status: str
 
-    class Config:
-        orm_mode = True
+    # --- THIS IS THE FIX ---
+    model_config = ConfigDict(from_attributes=True)
