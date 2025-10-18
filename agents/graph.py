@@ -492,6 +492,122 @@ async def check_eligibility(state: AgentState) -> AgentState:
     current_error = state.get("error_message")
     return {**state, "error_message": f"{current_error}\n{final_error_message}" if current_error else final_error_message}
 
+
+# --- Recommendation Agent Node (NEW) ---
+@observe()
+async def generate_recommendation(state: AgentState) -> AgentState:
+    """
+    Generates financial and economic enablement recommendations based on eligibility.
+    Uses RAG for job/training matching if applicable.
+    """
+    print(f"--- Generating Recommendation for App ID: {state['application_id']} ---")
+    application_id = state["application_id"]
+    applicant_id = state["applicant_id"]
+    eligibility_decision = state.get("eligibility_decision")
+    eligibility_score = state.get("eligibility_score")
+    validated_data = state.get("validated_data", {}) # Get validated data, default to empty dict
+    errors = []
+
+    current_span = langfuse_context.get_current_span()
+    if current_span:
+        current_span.input({
+            "application_id": application_id,
+            "eligibility_decision": eligibility_decision,
+            "eligibility_score": eligibility_score
+        })
+
+    if not eligibility_decision:
+        error_msg = "Recommendation failed: Eligibility decision not found in state."
+        print(error_msg)
+        if current_span:
+            current_span.level="ERROR"; current_span.status_message = error_msg
+            current_span.output({"status": "failed", "errors": [error_msg]})
+        # Preserve previous errors if any
+        current_error = state.get("error_message")
+        return {**state, "error_message": f"{current_error}\n{error_msg}" if current_error else error_msg}
+
+    # --- 1. Financial Support Recommendation ---
+    financial_recommendation = ""
+    if eligibility_decision == "Approve":
+        # Basic approval message - could be enhanced with rules for amounts, etc.
+        financial_recommendation = f"Congratulations {validated_data.get('full_name', 'Applicant')}! Your application for financial support has been approved (Score: {eligibility_score:.2f}). Further details will be communicated separately."
+    elif eligibility_decision == "Decline":
+        financial_recommendation = f"We regret to inform you {validated_data.get('full_name', 'Applicant')} that your application for financial support could not be approved at this time (Score: {eligibility_score:.2f}). However, we encourage you to explore the following economic enablement opportunities:"
+    else: # Handle Review or other states if added later
+         financial_recommendation = f"Your application (ID: {application_id}) requires further review. We will update you on the status soon."
+         # For review cases, maybe skip economic enablement for now
+         if current_span:
+             current_span.output({"status": "review_needed", "recommendation": financial_recommendation})
+         return {**state, "final_recommendation": financial_recommendation}
+
+
+    # --- 2. Economic Enablement Recommendation (using RAG) ---
+    economic_recommendation = ""
+    # Placeholder: Assume resume text was extracted and embedded during persistence
+    # We need the vector ID used during persistence (we used application_id)
+    vector_id = application_id
+
+    if eligibility_decision in ["Approve", "Decline"] and embedding_model and qdrant_client:
+        print("Searching Qdrant for relevant economic enablement opportunities...")
+        rag_step = current_span.step(name="rag-economic-enablement") if current_span else None
+        try:
+            # --- Perform a vector search ---
+            # Search for vectors similar to the applicant's resume vector
+            # This requires having *other* vectors in Qdrant representing jobs/courses
+            # For V1, we will just search for the applicant's *own* vector as a placeholder proof-of-concept
+            # In V2, you'd populate Qdrant with job/course embeddings separately.
+
+            search_result = qdrant_client.retrieve(
+                collection_name="applicant_resumes",
+                ids=[vector_id], # Retrieve the applicant's own data for now
+                with_payload=True,
+                with_vectors=False # Don't need the vector itself back
+            )
+
+            if rag_step: rag_step.input({"vector_id": vector_id})
+
+            if search_result:
+                # Placeholder: Use LLM to generate suggestions based on retrieved data
+                # For V1, we'll just acknowledge the search worked
+                economic_recommendation = "\n\nWe have identified potential economic enablement opportunities based on your profile (details would follow)."
+                print("Placeholder RAG search successful.")
+                if rag_step: rag_step.output({"search_results_count": len(search_result), "placeholder_message": economic_recommendation})
+            else:
+                 economic_recommendation = "\n\nWe recommend exploring general upskilling and job search resources available through the department."
+                 print("Applicant vector not found in Qdrant or RAG search failed.")
+                 if rag_step: rag_step.output({"search_results_count": 0, "message": "Vector not found"})
+
+
+        except Exception as e:
+            error_msg = f"Error during Qdrant search for economic enablement: {e}"
+            print(error_msg)
+            errors.append(error_msg)
+            economic_recommendation = "\n\nThere was an issue searching for tailored economic enablement opportunities."
+            if rag_step: rag_step.level="ERROR"; rag_step.status_message=error_msg; rag_step.output({"error": error_msg})
+        finally:
+             if rag_step: rag_step.end()
+
+
+    # --- 3. Combine Recommendations ---
+    final_recommendation = financial_recommendation + economic_recommendation
+
+    # --- Update State ---
+    if errors:
+        final_message = "Recommendation generation finished with errors:\n" + "\n".join(errors)
+        print(final_message)
+        if current_span:
+            current_span.level="WARNING"; current_span.status_message = "Recommendation Errors (RAG)"
+            current_span.output({"status": "partial_success", "errors": errors, "recommendation": final_recommendation})
+        current_error = state.get("error_message")
+        return {**state, "final_recommendation": final_recommendation, "error_message": f"{current_error}\n{final_message}" if current_error else final_message}
+    else:
+        print("Recommendation generated successfully.")
+        if current_span:
+             current_span.output({"status": "success", "recommendation": final_recommendation})
+        # Clear error state if recommendation was successful after eligibility check
+        return {**state, "final_recommendation": final_recommendation, "error_message": None}
+
+
 # --- Update Workflow Graph Definition ---
 workflow = StateGraph(AgentState)
 
@@ -500,6 +616,7 @@ workflow.add_node("extract_data", run_data_extraction)
 workflow.add_node("validate_data", run_data_validation) # Add the new node
 workflow.add_node("persist_data", persist_data)
 workflow.add_node("check_eligibility", check_eligibility) # Add eligibility check node
+workflow.add_node("generate_recommendation", generate_recommendation) # <-- Add new node for recommendation
 
 # Define the entry point
 workflow.set_entry_point("extract_data")
@@ -558,9 +675,19 @@ workflow.add_conditional_edges(
     }
 )
 
+# Edge after eligibility check -> Go to recommendation
+workflow.add_conditional_edges(
+    "check_eligibility",
+    lambda state: "generate_recommendation" if not state.get("error_message") else END,
+    {
+        "generate_recommendation": "generate_recommendation", # <-- Go to recommendation on success
+        END: END
+    }
+)
+
 # Edge after persistence
 # For now, end the workflow after attempting persistence
-workflow.add_edge("check_eligibility", END)
+workflow.add_edge("generate_recommendation", END)
 
 # Compile the graph
 app_graph = workflow.compile()
