@@ -1,19 +1,67 @@
+You are absolutely right. The formatting on GitHub is everything. The issue you're seeing is because the content was likely pasted into a file that wasn't saved with a `.md` extension, or the pasting process lost the Markdown formatting.
+
+Here is the full, professionally formatted code for your `README.md`. I've added badges for visual appeal and a table of contents for easy navigation.
+
+-----
+
+### **Instructions**
+
+1.  **Open your project** in a code editor like VS Code.
+2.  In the **root directory** of your project (`social-support-ai/`), create a new file named **`README.md`**. Make sure the extension is `.md`.
+3.  **Copy the entire content** from the code block below.
+4.  **Paste it** into your new `README.md` file.
+5.  **Save the file**.
+6.  **Commit and push** this new file to your GitHub repository.
+
+GitHub will automatically detect the `README.md` file and render it beautifully on your repository's main page.
+
+-----
+
+### File: `README.md`
+
+````markdown
 # Social Support AI Workflow Automation
+
+![Python](https://img.shields.io/badge/Python-3.11+-blue?style=for-the-badge&logo=python)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.115-green?style=for-the-badge&logo=fastapi)
+![Streamlit](https://img.shields.io/badge/Streamlit-1.38-red?style=for-the-badge&logo=streamlit)
+![Docker](https://img.shields.io/badge/Docker-Compose-blue?style=for-the-badge&logo=docker)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-336791?style=for-the-badge&logo=postgresql)
+![Neo4j](https://img.shields.io/badge/Neo4j-5-008CC1?style=for-the-badge&logo=neo4j)
+![LangGraph](https://img.shields.io/badge/LangGraph-Agentic-orange?style=for-the-badge)
+
+An AI-powered workflow to automate social support applications, reducing processing time from weeks to minutes using local LLMs and an agentic architecture.
+
+---
+
+## Table of Contents
+- [Project Overview](#project-overview)
+- [Key Features](#key-features)
+- [Architecture](#architecture)
+- [Technology Stack](#technology-stack)
+- [Setup and Running Instructions](#setup-and-running-instructions)
+- [Accessing Services](#accessing-services)
+- [Project Structure](#project-structure)
 
 ## Project Overview
 
 This project implements an AI-powered workflow to automate the application process for a government social security department. The goal is to drastically reduce the assessment and approval time from the current 5-20 working days to potentially minutes, leveraging multimodal AI, agentic orchestration, and local large language models (LLMs).
 
-The current manual process suffers from data entry errors, inconsistencies across documents, time-consuming reviews, and subjective decision-making. This solution aims to address these pain points by:
+The solution addresses key pain points of the manual process, including data entry errors, information inconsistencies, review bottlenecks, and subjective decision-making.
 
-1.  **Ingesting** applicant data from interactive forms and various document types (IDs, bank statements, resumes, asset lists).
-2.  **Automating** data extraction using multimodal LLMs.
-3.  **Validating** data consistency using schema checks and business rules.
-4.  **Persisting** structured and unstructured data across specialized databases (Relational, NoSQL, Graph, Vector).
-5.  **Predicting** eligibility using an explainable machine learning model.
-6.  **Generating** recommendations for financial support and economic enablement opportunities (job matching, training) using Retrieval-Augmented Generation (RAG).
-7.  **Orchestrating** the entire workflow using a stateful agentic framework (LangGraph).
-8.  **Providing** observability through Langfuse Cloud.
+## Key Features
+
+- **Automated Data Extraction:** Uses local multimodal (Qwen2-VL) and text (Llama 3.1) models via Ollama to parse data from PDFs, images, and Excel files.
+- **Agentic Orchestration:** A stateful, multi-step workflow managed by LangGraph ensures a robust and logical progression from extraction to decision.
+- **Multi-Database Strategy:** Persists data across specialized databases for optimal use:
+  - **PostgreSQL:** For structured "golden record" data.
+  - **MongoDB:** For raw, unstructured extraction results.
+  - **Neo4j:** For modeling and querying complex relationships to detect inconsistencies.
+  - **Qdrant:** For vector embeddings to power semantic search for RAG.
+- **Explainable Eligibility Scoring:** A Scikit-learn model served via a dedicated API provides objective, auditable eligibility predictions.
+- **RAG-Powered Recommendations:** Generates economic enablement suggestions (job matching, training) using vector search.
+- **Full Observability:** End-to-end tracing of the agentic workflow is handled via Langfuse Cloud.
+- **Interactive UI:** A simple Streamlit application provides the interface for applicants.
 
 ## Architecture
 
@@ -50,16 +98,13 @@ graph TD
     subgraph Local Model Hosting
         A2 -- Parser LLM Call --> OLLAMA(Ollama @ :11434\n- qwen2-vl:7b\n- llama3.1:8b)
         A4 -- Embedding Call --> ST(SentenceTransformer\n'all-MiniLM-L6-v2')
-        # A6 could also call Ollama or use ST embeddings
     end
 
     subgraph Data & Persistence Layer
         A4 -- (Raw JSON) --> DB_MONGO(MongoDB @ :27017)
-        A4 -- (Golden Record) --> DB_PG(PostgreSQL @ :5432)
-        A7 -- (Final Result) --> DB_PG
+        A4 & A7 -- (Golden Record) --> DB_PG(PostgreSQL @ :5432)
         A4 -- (Relationships) --> DB_NEO4J(Neo4j @ :7687)
-        A4 -- (Embeddings) --> DB_QDRANT(Qdrant @ :6333)
-        A6 -- (RAG Query) --> DB_QDRANT
+        A4 & A6 -- (Embeddings/RAG) --> DB_QDRANT(Qdrant @ :6333)
     end
 
     subgraph Classical ML Service
@@ -71,168 +116,112 @@ graph TD
     subgraph Caching
         API -- Session/Cache --> DB_REDIS(Redis @ :6379)
     end
+````
 
+## Technology Stack
 
-    Data Flow:
+  - **Programming Language:** Python 3.11+
+  - **Web Frameworks:** FastAPI, Streamlit
+  - **Agent Orchestration:** LangGraph
+  - **Local LLM Hosting:** Ollama
+  - **Document Parsing:** `ollama` client, `pdfplumber`, `pandas`
+  - **Embeddings:** Sentence Transformers
+  - **Machine Learning:** Scikit-learn, Joblib
+  - **Databases:** PostgreSQL (SQLAlchemy, Alembic), MongoDB, Neo4j, Qdrant, Redis
+  - **Observability:** Langfuse Cloud
+  - **Containerization:** Docker, Docker Compose
+  - **Schema/Validation:** Pydantic
 
-The Applicant interacts with the Streamlit App, providing details and uploading documents.
+## Setup and Running Instructions
 
-Streamlit sends requests to the FastAPI Backend.
+**Prerequisites:**
 
-Upon receiving necessary data/files, FastAPI triggers the LangGraph Orchestrator, initializing the application state via a background task.
+  * Docker and Docker Compose
+  * Python \>= 3.11
+  * Git
 
-The Data Extraction Agent uses the ollama service (local LLMs like Qwen2-VL for images/PDFs, Llama 3.1 for text-based extraction from digital PDFs) and pandas (for Excel) to parse documents. Raw results are stored in MongoDB.
+**Execution Steps:**
 
-The Data Validation Agent uses Pydantic schemas and custom rules to check the extracted data for correctness and consistency.
+1.  **Clone the Repository:**
 
-If validation passes, the Data Persistence Agent saves:
+    ```bash
+    git clone <your-repo-url>
+    cd social-support-ai
+    ```
 
-Structured data (applicant profile, application status) to PostgreSQL.
+2.  **Create `.env` File:**
+    Create a file named `.env` in the project root. Copy the contents from `.env.example` (if provided) or create it manually with the following variables. **You must provide your own values.**
 
-Relationships (family, addresses) to Neo4j.
+    ```ini
+    # PostgreSQL Credentials
+    POSTGRES_USER=social_admin
+    POSTGRES_PASSWORD=strongpassword123
+    POSTGRES_DB=social_support_db
 
-Embeddings (e.g., from resume text using SentenceTransformer) to Qdrant.
+    # Neo4j Password (format: neo4j/your_password)
+    NEO4J_AUTH=neo4j/verystrongpassword
 
-The Eligibility Agent fetches relevant features from PostgreSQL and sends them to the separate ML Service API.
+    # Langfuse Cloud Credentials (get from cloud.langfuse.com)
+    LANGFUSE_HOST=[https://cloud.langfuse.com](https://cloud.langfuse.com)
+    LANGFUSE_SECRET_KEY=sk-lf-...
+    LANGFUSE_PUBLIC_KEY=pk-lf-...
 
-The ML Service loads a pre-trained Scikit-learn model (HistGradientBoostingClassifier) and returns an eligibility prediction and score.
+    # API Port
+    API_PORT=8000
+    ```
 
-The Recommendation Agent uses the eligibility decision and performs a RAG query against Qdrant (using embeddings - placeholder V1) to find relevant economic enablement opportunities. It crafts a final recommendation message.
+3.  **Build and Run Docker Containers:**
+    This command will build the custom images and start all services.
 
-The Save Result Agent updates the application record in PostgreSQL with the final recommendation message and status (Completed/Error).
+    ```bash
+    docker-compose up -d --build
+    ```
 
-Throughout the process, agents send traces to Langfuse Cloud for observability. Redis is available for caching.
+    Please wait 1-2 minutes for all database services to initialize fully.
 
-Setup Instructions
-Prerequisites:
+4.  **Pull Ollama Models:**
+    Download the required local LLMs into the running Ollama container:
 
-Docker and Docker Compose
+    ```bash
+    docker-compose exec ollama ollama pull llama3.1:8b
+    docker-compose exec ollama ollama pull qwen2-vl:7b
+    ```
 
-Python >= 3.11
+5.  **Run Database Migrations:**
+    Apply the initial PostgreSQL schema using Alembic:
 
-Git
+    ```bash
+    docker-compose exec api alembic upgrade head
+    ```
 
-Steps:
+    The application is now ready.
 
-Clone the repository:
+## Accessing Services
 
-Bash
+Once the containers are running, the following services are available:
 
-git clone <your-repo-url>
-cd social-support-ai
-Create .env file:
-Copy the .env.example file (if you created one, otherwise create .env manually) to .env and fill in the required values:
+  - **Streamlit UI:** `http://localhost:8501`
+  - **FastAPI Backend Docs:** `http://localhost:8000/docs`
+  - **Neo4j Browser:** `http://localhost:7474`
+  - **ML Service Health:** `http://localhost:8001/health`
+  - **Langfuse Traces:** Log in to your account at `https://cloud.langfuse.com`
 
-Bash
+## Project Structure
 
-# Example command if you have .env.example
-# cp .env.example .env
-# Edit .env using a text editor
-You must provide:
-
-PostgreSQL credentials (POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB)
-
-Neo4j password (NEO4J_AUTH=neo4j/your_password)
-
-Langfuse Cloud API Keys (LANGFUSE_HOST=https://cloud.langfuse.com, LANGFUSE_SECRET_KEY, LANGFUSE_PUBLIC_KEY) - Get these from your Langfuse Cloud project settings.
-
-API Port (API_PORT=8000)
-
-Build and Run Docker Containers:
-
-Bash
-
-docker-compose up -d --build
-This will build the images for the API, Streamlit UI, and ML service, and start all required database/model containers. Wait a minute or two for all services to initialize.
-
-Pull Ollama Models:
-Download the required local LLMs into the running Ollama container:
-
-Bash
-
-docker-compose exec ollama ollama pull llama3.1:8b
-docker-compose exec ollama ollama pull qwen2-vl:7b
-# docker-compose exec ollama ollama pull nomic-embed-text # If using Ollama for embeddings
-Run Database Migrations:
-Apply the initial PostgreSQL schema:
-
-Bash
-
-docker-compose exec api alembic upgrade head
-Running the Application
-Once the containers are running:
-
-Streamlit UI: Access the applicant interface at http://localhost:8501
-
-FastAPI Backend Docs: Explore the API endpoints at http://localhost:8000/docs
-
-Neo4j Browser: Visualize the graph database at http://localhost:7474 (Connect with user neo4j and the password set in your .env file).
-
-Langfuse Cloud: Log in to https://cloud.langfuse.com to view traces for processed applications.
-
-ML Service Health: Check the ML service status at http://localhost:8001/health
-
-Technology Stack
-Programming Language: Python 3.11+
-
-Web Frameworks: FastAPI (Backend API, ML Service), Streamlit (Frontend UI)
-
-Agent Orchestration: LangGraph
-
-Local LLM Hosting: Ollama (serving Llama 3.1, Qwen2-VL)
-
-Document Parsing: ollama client (VLM/LLM calls), pdfplumber, pandas
-
-Embeddings: Sentence Transformers (all-MiniLM-L6-v2)
-
-Machine Learning: Scikit-learn (HistGradientBoostingClassifier), Joblib
-
-Databases:
-
-Relational: PostgreSQL (with SQLAlchemy & Alembic)
-
-NoSQL Document: MongoDB (with pymongo)
-
-Graph: Neo4j (with neo4j driver)
-
-Vector: Qdrant (with qdrant-client)
-
-Cache: Redis (with redis)
-
-Observability: Langfuse Cloud (langfuse client)
-
-Containerization: Docker, Docker Compose
-
-Schema/Validation: Pydantic
-
-Directory Structure
+```
 social-support-ai/
 ├── README.md              # This file
 ├── solution_summary.pdf   # Solution summary document
-├── .env.example           # Environment variable template
-├── .env                   # Local environment variables (ignored by git)
-├── .gitignore
 ├── requirements.txt       # Python dependencies
 ├── docker-compose.yml     # Docker service definitions
-├── alembic.ini            # Alembic configuration
 ├── alembic/               # Alembic migration scripts
-├── apps/                  # Application code
-│   ├── api/               # FastAPI backend (main API)
-│   └── streamlit_app/     # Streamlit frontend UI code
+├── apps/                  # Application code (API & UI)
 ├── agents/                # LangGraph agent nodes and graph definition
-│   ├── graph.py
-│   ├── schemas.py         # Pydantic schemas for validation
-│   └── state.py           # LangGraph state definition
 ├── docker/                # Dockerfiles for custom images
-│   ├── Dockerfile.api
-│   ├── Dockerfile.ml
-│   └── Dockerfile.streamlit
-├── ml/                    # Machine Learning model code
-│   ├── models/            # Saved model files (e.g., .joblib)
-│   ├── serve_model.py     # FastAPI service for ML model serving
-│   └── train_dummy_model.py # Script to train placeholder model
+├── ml/                    # Machine Learning model code and serving API
 ├── parsers/               # Document parsing utilities
-│   └── document_parser.py # Logic using Ollama/pdfplumber/pandas
-└── storage/               # Database interaction code
-    ├── database.py        # SQLAlchemy engine/session setup
-    └── models.py          # SQLAlchemy ORM models (Postgres schema)
+└── storage/               # Database interaction code and models
+```
+
+```
+```
