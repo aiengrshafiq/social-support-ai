@@ -1,0 +1,38 @@
+# requirements.txt
+
+# --- Core Framework ---
+fastapi
+uvicorn[standard]
+streamlit
+pydantic
+python-dotenv
+
+# --- Databases ---
+sqlalchemy
+psycopg2-binary
+alembic       # For PostgreSQL migrations
+pymongo       # For MongoDB
+qdrant-client # For Qdrant
+neo4j         # For Neo4j
+redis         # For Redis
+
+# --- AI / LangChain ---
+langchain
+langgraph
+langchain-community
+langchain-ollama
+langfuse      # For observability
+
+# --- ML & Parsing ---
+scikit-learn
+pandas
+shap
+paddlepaddle-gpu # or paddlepaddle (CPU)
+paddleocr
+layoutparser
+pdfplumber    # Easier than PyPDF2 for table/text
+camelot-py[cv]
+opencv-python-headless
+
+# --- Utility ---
+python-multipart # For file uploads
