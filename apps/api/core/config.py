@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     LANGFUSE_HOST: Optional[AnyHttpUrl] = None # Use AnyHttpUrl for validation
     LANGFUSE_SECRET_KEY: Optional[str] = None
     LANGFUSE_PUBLIC_KEY: Optional[str] = None
+    NEO4J_AUTH: Optional[str] = None
 
     # --- API Config ---
     API_HOST: str = "0.0.0.0"

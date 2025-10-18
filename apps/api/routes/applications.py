@@ -46,6 +46,8 @@ def run_graph_background(initial_state: AgentState):
     config = {}
     if trace:
         config["configurable"] = {"trace": trace} # Pass trace object if available
+        
+    final_state = None
 
     try:
         # Stream events (good for debugging, optional for background task)

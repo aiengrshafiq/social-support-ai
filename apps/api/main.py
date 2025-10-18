@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from apps.api.routes import applications
 from storage import database, models  # Make sure database.py is correctly set up
 from apps.api.core.config import settings
+from fastapi.middleware.cors import CORSMiddleware
 # --- THIS IS THE MOST LIKELY CORRECT IMPORT ---
 from langfuse import Langfuse # Import the main Langfuse class
 
@@ -12,6 +13,24 @@ app = FastAPI(
     description="API for managing and processing social support applications.",
     version="0.1.0"
 )
+
+# --- ADD CORS MIDDLEWARE CONFIGURATION ---
+# Define the origins allowed to make requests to this API
+origins = [
+    "http://localhost", # Allow base localhost
+    "http://localhost:8000", # Allow FastAPI docs origin
+    "http://localhost:8501", # Allow Streamlit app origin
+    # Add any other origins if needed (e.g., your deployed frontend URL)
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins, # List of origins allowed
+    allow_credentials=True, # Allow cookies
+    allow_methods=["*"], # Allow all methods (GET, POST, etc.)
+    allow_headers=["*"], # Allow all headers
+)
+# --- END ADDITION ---
 
 # Initialize Langfuse - **Manual Integration is more robust**
 # Instead of relying on the changing FastAPIIntegration class,
