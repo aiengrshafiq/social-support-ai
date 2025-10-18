@@ -2,234 +2,111 @@
 import os
 import json
 import httpx
-from langgraph.graph import StateGraph, END
-from pymongo import MongoClient
-from langfuse import Langfuse # Import Langfuse client
-from langfuse.decorators import langfuse_context, observe # Import decorators
+import datetime
+import numpy as np # For embedding conversion if needed
+from typing import TypedDict, List, Dict, Optional, Any # Ensure Any is imported
 
-# Assuming your parser is in parsers/document_parser.py
+# --- LangGraph Imports ---
+from langgraph.graph import StateGraph, END
+
+# --- Database Imports ---
+from pymongo import MongoClient
+from neo4j import GraphDatabase
+from qdrant_client import QdrantClient, models
+from sqlalchemy.orm import Session # For type hinting if needed later
+from storage.database import SessionLocal # For getting PG session
+from storage import models as pg_models # Import SQLAlchemy models
+
+# --- Langfuse Imports ---
+
+import langfuse # <-- Import the main library
+from langfuse.decorators import observe # <-- Keep observe decorator
+from langfuse import Langfuse as LangfuseClient # Rename client class to avoid conflict
+
+
+# --- Project Imports ---
 from parsers.document_parser import extract_data_from_document
 from agents.state import AgentState
-from apps.api.core.config import settings # For Langfuse keys/host
-
-from pydantic import ValidationError
 from agents.schemas import ValidatedApplicationData
+from apps.api.core.config import settings
 
+# --- Pydantic Imports ---
+from pydantic import ValidationError
 
-from neo4j import GraphDatabase # <-- Add Neo4j driver
-from qdrant_client import QdrantClient, models # <-- Add Qdrant client
-from sentence_transformers import SentenceTransformer # For embeddings
-import numpy as np # For embedding conversion if needed
-
-
-# --- Initialize Neo4j Connection ---
-NEO4J_URI = "bolt://neo4j:7687" # Use Docker service name
-NEO4J_USER = "neo4j"
-NEO4J_PASSWORD = settings.NEO4J_AUTH.split('/')[1] if settings.NEO4J_AUTH else "password" # Extract password
-neo4j_driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
-print("Neo4j driver initialized.")
-
-# --- Initialize Qdrant Connection ---
-QDRANT_HOST = "qdrant" # Use Docker service name
-QDRANT_PORT = 6333
-qdrant_client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
-print("Qdrant client initialized.")
-
-# --- Initialize Embedding Model (using sentence-transformers) ---
-# This will run locally on the CPU within the API container.
-# Ensure 'sentence-transformers' is added to requirements.txt if not already present
-# Or alternatively, use Ollama's nomic-embed-text via the ollama client
+# --- Embedding Imports ---
+# Choose one method:
+# 1. Sentence Transformers (local CPU/GPU)
 try:
-    # Using a small, efficient model suitable for CPU
+    from sentence_transformers import SentenceTransformer
     embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+    EMBEDDING_DIM = embedding_model.get_sentence_embedding_dimension()
     print("Sentence Transformer embedding model loaded.")
-    # --- Create Qdrant Collection (if it doesn't exist) ---
-    try:
-        qdrant_client.create_collection(
-            collection_name="applicant_resumes",
-            vectors_config=models.VectorParams(size=embedding_model.get_sentence_embedding_dimension(), distance=models.Distance.COSINE)
-        )
-        print("Created Qdrant collection 'applicant_resumes'.")
-    except Exception as e:
-        if "already exists" in str(e):
-             print("Qdrant collection 'applicant_resumes' already exists.")
-        else:
-             print(f"Error creating/checking Qdrant collection: {e}")
-
-except Exception as e:
-    print(f"Error loading Sentence Transformer model: {e}. Embeddings will not be generated.")
+except ImportError:
+    print("Sentence Transformers not installed. Run 'pip install sentence-transformers'. Embeddings disabled.")
     embedding_model = None
+    EMBEDDING_DIM = 384 # Default dimension for 'all-MiniLM-L6-v2' if model fails to load but collection exists
+except Exception as e:
+    print(f"Error loading Sentence Transformer model: {e}. Embeddings disabled.")
+    embedding_model = None
+    EMBEDDING_DIM = 384
 
-from storage.database import SessionLocal
+# --- Database Client Initializations ---
 
-# --- Initialize MongoDB Connection ---
-# Use environment variables for connection string in production
-mongo_client = MongoClient("mongodb://mongo:27017/") # Use Docker service name
-db = mongo_client["social_support_raw_data"] # Database name
-raw_extractions_collection = db["raw_extractions"] # Collection name
+# MongoDB
+mongo_client = MongoClient("mongodb://mongo:27017/")
+db = mongo_client["social_support_raw_data"]
+raw_extractions_collection = db["raw_extractions"]
+print("MongoDB client initialized.")
 
+# Neo4j
+NEO4J_URI = "bolt://neo4j:7687"
+NEO4J_USER = "neo4j"
+NEO4J_PASSWORD = settings.NEO4J_AUTH.split('/')[1] if settings.NEO4J_AUTH and '/' in settings.NEO4J_AUTH else "password" # Safer split
+try:
+    neo4j_driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
+    neo4j_driver.verify_connectivity() # Check connection on startup
+    print("Neo4j driver initialized and connected.")
+except Exception as e:
+    print(f"Error initializing Neo4j driver: {e}")
+    neo4j_driver = None # Handle potential connection errors
 
-@observe()
-def persist_data(state: AgentState) -> AgentState:
-    """
-    Saves the validated application data to PostgreSQL, Neo4j, and Qdrant.
-    """
-    print(f"--- Running Data Persistence for App ID: {state['application_id']} ---")
-    application_id = state["application_id"]
-    validated_data = state.get("validated_data")
-    applicant_id = state["applicant_id"]
-    errors = []
-
-    
-    # if current_span:
-    #     current_span.input({"application_id": application_id, "validated_data_keys": list(validated_data.keys()) if validated_data else []})
-
-    if not validated_data:
-        error_msg = "Persistence failed: No validated data found."
-        print(error_msg)
-        # if current_span:
-        #     current_span.level="ERROR"
-        #     current_span.status_message = error_msg
-        #     current_span.output({"status": "failed", "errors": [error_msg]})
-        return {**state, "error_message": error_msg}
-
-    # --- 1. Persist to PostgreSQL (Main Record) ---
-    pg_session = SessionLocal()
+# Qdrant
+QDRANT_HOST = "qdrant"
+QDRANT_PORT = 6333
+QDRANT_COLLECTION = "applicant_resumes"
+try:
+    qdrant_client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT, timeout=10) # Add timeout
+    # Check connection / collection existence
     try:
-        # Find the existing application record
-        db_application = pg_session.query(models.Application).filter(models.Application.id == application_id).first()
-        if db_application:
-            # Update the application with the validated data JSON blob
-            db_application.validated_data = validated_data
-            # Potentially update applicant details if needed (e.g., phone number)
-            db_applicant = pg_session.query(models.Applicant).filter(models.Applicant.id == applicant_id).first()
-            if db_applicant:
-                 # Update fields if they exist in validated_data and are different
-                 if 'full_name' in validated_data and validated_data['full_name'] != db_applicant.full_name:
-                     db_applicant.full_name = validated_data['full_name']
-                 if 'email' in validated_data and validated_data['email'] != db_applicant.email:
-                     db_applicant.email = validated_data['email']
-                 # ... add other fields like phone_number ...
-
-            pg_session.commit()
-            print(f"Application {application_id} updated in PostgreSQL.")
-        else:
-            errors.append(f"Application {application_id} not found in PostgreSQL.")
-
-    except Exception as e:
-        pg_session.rollback()
-        error_msg = f"Error persisting to PostgreSQL: {str(e)}"
-        print(error_msg)
-        errors.append(error_msg)
-    finally:
-        pg_session.close()
-
-    # --- 2. Persist to Neo4j (Relationships) ---
-    try:
-        with neo4j_driver.session() as session:
-            # Create/Update Applicant Node
-            session.run("""
-                MERGE (p:Person {emiratesId: $emirates_id})
-                ON CREATE SET p.name = $name, p.applicationId = $app_id
-                ON MATCH SET p.name = $name, p.applicationId = $app_id
-                """,
-                emirates_id=validated_data.get('emirates_id'),
-                name=validated_data.get('full_name'),
-                app_id=application_id)
-
-            # Create Address Node and Relationship (Example)
-            if validated_data.get('address'):
-                session.run("""
-                    MERGE (a:Address {fullAddress: $address})
-                    WITH a
-                    MATCH (p:Person {emiratesId: $emirates_id})
-                    MERGE (p)-[:LIVES_AT]->(a)
-                    """,
-                    address=validated_data.get('address'),
-                    emirates_id=validated_data.get('emirates_id'))
-
-            # Create Family Member Nodes and Relationships (Example)
-            for member in validated_data.get('family_members', []):
-                 if member.get('name') and member.get('relation'):
-                     session.run("""
-                         MERGE (fm:Person {name: $member_name}) // Simplistic merge, needs better ID
-                         WITH fm
-                         MATCH (applicant:Person {emiratesId: $applicant_id})
-                         MERGE (applicant)-[:HAS_FAMILY_MEMBER {relation: $relation}]->(fm)
-                         """,
-                         member_name=member['name'],
-                         applicant_id=validated_data.get('emirates_id'),
-                         relation=member['relation'])
-
-            print(f"Data for applicant {validated_data.get('emirates_id')} updated in Neo4j.")
-
-    except Exception as e:
-        error_msg = f"Error persisting to Neo4j: {str(e)}"
-        print(error_msg)
-        errors.append(error_msg)
-
-    # --- 3. Persist Embeddings to Qdrant (Example: Resume Text) ---
-    # This assumes 'resume_text' is extracted somehow (modify parser/state if needed)
-    resume_text = validated_data.get("resume_text", "") # Placeholder
-    if resume_text and embedding_model:
-        try:
-            # Generate embedding
-            vector = embedding_model.encode(resume_text).tolist()
-
-            # Upsert into Qdrant
-            qdrant_client.upsert(
-                collection_name="applicant_resumes",
-                points=[
-                    models.PointStruct(
-                        id=application_id, # Use application ID or a specific resume ID
-                        vector=vector,
-                        payload={ # Store metadata alongside the vector
-                            "applicant_id": applicant_id,
-                            "application_id": application_id,
-                            "file_type": "resume" # Or identify source
-                        }
-                    )
-                ],
-                wait=True # Ensure operation completes
+         qdrant_client.get_collection(collection_name=QDRANT_COLLECTION)
+         print(f"Qdrant collection '{QDRANT_COLLECTION}' found.")
+    except Exception as e_coll:
+        if "404" in str(e_coll): # Check specific error for collection not found
+            print(f"Qdrant collection '{QDRANT_COLLECTION}' not found. Creating...")
+            qdrant_client.create_collection(
+                collection_name=QDRANT_COLLECTION,
+                vectors_config=models.VectorParams(size=EMBEDDING_DIM, distance=models.Distance.COSINE)
             )
-            print(f"Resume embedding for application {application_id} saved to Qdrant.")
+            print(f"Created Qdrant collection '{QDRANT_COLLECTION}'.")
+        else:
+            print(f"Error checking Qdrant collection: {e_coll}")
+            # Potentially raise error or disable Qdrant functionality
+    print("Qdrant client initialized.")
+except Exception as e:
+    print(f"Error initializing Qdrant client: {e}. Qdrant operations disabled.")
+    qdrant_client = None
 
-        except Exception as e:
-            error_msg = f"Error saving embedding to Qdrant: {str(e)}"
-            print(error_msg)
-            errors.append(error_msg)
 
-
-    # --- Update State ---
-    final_message = "Persistence completed."
-    if errors:
-        final_message = "Persistence finished with errors:\n" + "\n".join(errors)
-        print(final_message)
-        # if current_span:
-        #     current_span.level="ERROR"
-        #     current_span.status_message = "Persistence Errors"
-        #     current_span.output({"status": "errors", "errors": errors})
-        # Keep existing error message if validation failed, otherwise add persistence errors
-        current_error = state.get("error_message")
-        return {**state, "error_message": f"{current_error}\n{final_message}" if current_error else final_message}
-    else:
-        print(final_message)
-        if current_span:
-            current_span.output({"status": "success"})
-        # Clear error state if persistence was successful after validation was successful
-        return {**state, "error_message": None}
-
-# --- Initialize Langfuse Client ---
-# Use the client directly from settings if available, else initialize here
-# Ensure .env has LANGFUSE_HOST, LANGFUSE_SECRET_KEY, LANGFUSE_PUBLIC_KEY for cloud
+# --- Langfuse Client Initialization ---
 langfuse_client = None
 if settings.LANGFUSE_HOST and settings.LANGFUSE_SECRET_KEY and settings.LANGFUSE_PUBLIC_KEY:
     try:
-        langfuse_client = Langfuse(
-            host=str(settings.LANGFUSE_HOST), # Ensure host is string
+        langfuse_client = LangfuseClient(
+            host=str(settings.LANGFUSE_HOST),
             secret_key=settings.LANGFUSE_SECRET_KEY,
             public_key=settings.LANGFUSE_PUBLIC_KEY,
-            release="social-support-ai-v1.0"
+            release="social-support-ai-v1.0",
+            flush_interval=1 # Flush more frequently for background tasks
         )
         print("Langfuse client for Graph initialized.")
     except Exception as e:
@@ -238,31 +115,27 @@ if settings.LANGFUSE_HOST and settings.LANGFUSE_SECRET_KEY and settings.LANGFUSE
 else:
     print("Langfuse env vars not set in Graph, tracing disabled.")
 
-# --- Helper to get Langfuse context ---
+# --- Langfuse Helper ---
 def get_langfuse_trace(application_id):
     if langfuse_client:
-        # Create a unique trace for each application run
         return langfuse_client.trace(name="application-workflow", user_id=f"app-{application_id}")
     return None
 
-# --- Data Extraction Agent Node ---
-# Use @observe for automatic Langfuse tracing if client is available
-@observe()
-def run_data_extraction(state: AgentState) -> AgentState:
+# ==================================
+# == Agent Nodes ==
+# ==================================
+
+@observe() # Decorator handles main span
+def run_data_extraction(state: AgentState) -> Dict[str, Any]: # Return explicit Dict for clarity
     """
-    Extracts data from uploaded documents using the multimodal parser.
+    Extracts data from uploaded documents.
+    Uses sub-steps for each document.
     """
     print(f"--- Running Data Extraction for App ID: {state['application_id']} ---")
     application_id = state["application_id"]
     uploaded_files = state["uploaded_files"]
     all_extracted_data = {}
     errors = []
-
-   
-    
-    # # Input metadata for Langfuse
-    # if current_span:
-    #     current_span.input({"application_id": application_id, "files": list(uploaded_files.keys())})
 
     for file_type, file_path in uploaded_files.items():
         if not os.path.exists(file_path):
@@ -272,210 +145,295 @@ def run_data_extraction(state: AgentState) -> AgentState:
             continue
 
         print(f"Processing {file_type}: {file_path}...")
-        
-        # --- Langfuse Step for each document ---
-        extraction_step = None
-        if current_span:
-             extraction_step = current_span.step(name=f"extract-{file_type}", input={"file_path": file_path})
 
         try:
-            # Call the parser function (sync version for simplicity now)
-            # In production, use async/await if parser supports it
-            extracted = extract_data_from_document(file_path)
-            
-            # --- Update Langfuse Step ---
-            if extraction_step:
-                extraction_step.output(extracted)
-                extraction_step.end() # Mark step as completed
+            # Use context manager for step - automatically linked to parent @observe span
+            with langfuse.get_current_observation().step(name=f"extract-{file_type}", input={"file_path": file_path}) as extraction_step:
+                try:
+                    extracted = extract_data_from_document(file_path)
+                    extraction_step.output(extracted) # Log output for this step
 
-            if "_error" in extracted:
-                error_msg = f"Error extracting {file_type}: {extracted['_error']}"
-                print(error_msg)
-                errors.append(error_msg)
-                # Store the raw error output too
-                all_extracted_data[f"{file_type}_raw_error"] = extracted.get("_raw_output", extracted['_error'])
-            else:
-                all_extracted_data[file_type] = extracted
-                print(f"Successfully extracted data for {file_type}.")
+                    if "_error" in extracted:
+                        error_msg = f"Error extracting {file_type}: {extracted['_error']}"
+                        print(error_msg)
+                        errors.append(error_msg)
+                        all_extracted_data[f"{file_type}_raw_error"] = extracted.get("_raw_output", extracted['_error'])
+                        extraction_step.level = "ERROR"
+                        extraction_step.status_message = error_msg
+                    else:
+                        all_extracted_data[file_type] = extracted
+                        print(f"Successfully extracted data for {file_type}.")
 
-        except Exception as e:
-            error_msg = f"Unhandled exception processing {file_type}: {str(e)}"
-            print(error_msg)
-            errors.append(error_msg)
-            # --- Update Langfuse Step on unhandled error ---
-            if extraction_step:
-                 extraction_step.level = "ERROR"
-                 extraction_step.status_message = error_msg
-                 extraction_step.end() # Mark step as ended (with error)
+                except Exception as e:
+                    error_msg = f"Unhandled exception processing {file_type}: {str(e)}"
+                    print(error_msg)
+                    errors.append(error_msg)
+                    extraction_step.level = "ERROR"
+                    extraction_step.status_message = error_msg
+                    # Optionally re-raise if needed: raise e
+
+        except Exception as e_ctx:
+             print(f"Error setting up Langfuse step context for {file_type}: {e_ctx}")
+             # Log error but continue with other files if possible
+             errors.append(f"Langfuse context error for {file_type}: {e_ctx}")
 
 
     # --- Store Raw Results in MongoDB ---
     try:
         raw_extractions_collection.insert_one({
             "application_id": application_id,
-            "extracted_data": all_extracted_data,
-            "errors": errors,
+            "extracted_data": all_extracted_data, # Store potentially mixed results
+            "errors": errors, # Store errors encountered
             "timestamp": datetime.datetime.utcnow()
         })
         print("Raw extraction results saved to MongoDB.")
     except Exception as e:
         mongo_error = f"Failed to save raw extractions to MongoDB: {str(e)}"
         print(mongo_error)
-        errors.append(mongo_error) # Add DB error to the list
+        errors.append(mongo_error)
 
-    # --- Update State ---
-    # Merge extracted data into a single dictionary if needed, or keep separate
+    # --- Prepare return state ---
     final_data = {}
     for key, data in all_extracted_data.items():
-        if isinstance(data, dict): # Avoid merging raw error strings
-            final_data.update(data) # Simple merge for V1
-            
-    # Output metadata for Langfuse
-    if current_span:
-        current_span.output({"extracted_data_keys": list(final_data.keys()), "errors": errors})
+        if isinstance(data, dict):
+            final_data.update(data) # Simple merge
 
-    # Decide next step based on errors
+    # @observe automatically logs return value as output
     if errors:
         print("Errors occurred during extraction.")
-        return {**state, "error_message": "\n".join(errors), "extracted_data": final_data} # Pass partial data
+        # Combine errors into a single message for the state
+        error_summary = "Extraction Errors:\n" + "\n".join(errors)
+        return {"extracted_data": final_data, "error_message": error_summary}
     else:
         print("Data extraction completed successfully.")
-        return {**state, "extracted_data": final_data, "error_message": None}
+        return {"extracted_data": final_data, "error_message": None} # Clear errors
 
 
-# --- Data Validation Agent Node (NEW) ---
-@observe() # Trace this node with Langfuse
-def run_data_validation(state: AgentState) -> AgentState:
+@observe()
+def run_data_validation(state: AgentState) -> Dict[str, Any]:
     """
     Validates the extracted data against schema and business rules.
     """
     print(f"--- Running Data Validation for App ID: {state['application_id']} ---")
-    application_id = state["application_id"]
     extracted_data = state.get("extracted_data")
     validation_errors = []
-
-   
-    if current_span:
-        current_span.input({"application_id": application_id, "extracted_data_keys": list(extracted_data.keys()) if extracted_data else []})
+    validated_data_dict = {} # Initialize
 
     if not extracted_data:
         error_msg = "Validation failed: No extracted data found in state."
         print(error_msg)
-        if current_span:
-            current_span.level = "ERROR"
-            current_span.status_message = error_msg
-            current_span.output({"validation_status": "failed", "errors": [error_msg]})
-        return {**state, "error_message": error_msg}
+        langfuse.update_current_observation(level="ERROR", status_message=error_msg)
+        return {"error_message": error_msg} # Return only error
 
-    # 1. Pydantic Schema Validation
     try:
-        # Attempt to parse the extracted data using our Pydantic model
-        # This checks required fields, types, and basic validators
+        # Pydantic Validation
         validated_pydantic = ValidatedApplicationData(**extracted_data)
+        validated_data_dict = validated_pydantic.model_dump(exclude_unset=True)
         print("Pydantic schema validation successful.")
-        # Store the Pydantic-validated data (includes defaults, type coercion)
-        validated_data_dict = validated_pydantic.model_dump(exclude_unset=True) # Use model_dump
-
     except ValidationError as e:
         error_msg = f"Pydantic validation failed: {e}"
         print(error_msg)
         validation_errors.append(error_msg)
-        # Even if Pydantic fails, keep the raw extracted data for potential partial use or debugging
-        validated_data_dict = extracted_data # Fallback to raw data on schema failure
+        validated_data_dict = extracted_data # Fallback to raw on schema failure for potential partial persistence
 
-    # 2. Custom Business Rule Checks (Add more as needed)
-    # Example: Check if income is present if an employer is listed
+    # --- Custom Business Rule Checks ---
     if validated_data_dict.get("employer") and not validated_data_dict.get("total_income"):
         warning_msg = "Validation Warning: Employer listed but no income extracted."
         print(warning_msg)
-        # For V1, we'll just log warnings, not fail the validation
-        # validation_errors.append(warning_msg)
+        # We don't add warnings to errors for now
 
-    # Example: Check for consistency between different document sources (if available)
-    # This requires modifying the state/parser to store source info
-    # e.g., if 'address_from_id' in validated_data_dict and 'address_from_statement' in validated_data_dict:
-    #    if validated_data_dict['address_from_id'] != validated_data_dict['address_from_statement']:
-    #        error_msg = "Address mismatch between ID and bank statement."
-    #        validation_errors.append(error_msg)
+    # ... Add more consistency checks here (e.g., address matching) ...
 
-
-    # --- Update State ---
+    # --- Prepare return state ---
     if validation_errors:
         final_error_message = "Validation Failed:\n" + "\n".join(validation_errors)
         print(final_error_message)
-        if current_span:
-            current_span.level = "ERROR"
-            current_span.status_message = "Validation Failed"
-            current_span.output({"validation_status": "failed", "errors": validation_errors, "validated_data": validated_data_dict}) # Log partially validated data
-        # Keep partially validated data, set error
-        return {**state, "validated_data": validated_data_dict, "error_message": final_error_message}
+        langfuse.update_current_observation(level="ERROR", status_message="Validation Failed", output={"errors": validation_errors})
+        # Return partially validated data along with error
+        return {"validated_data": validated_data_dict, "error_message": final_error_message}
     else:
         print("Data validation completed successfully.")
-        if current_span:
-             current_span.output({"validation_status": "success", "validated_data": validated_data_dict})
-        # Store fully validated data, clear error
-        return {**state, "validated_data": validated_data_dict, "error_message": None}
+        # Return fully validated data, clear errors from this stage
+        return {"validated_data": validated_data_dict, "error_message": None}
 
 
-
-# --- Eligibility Check Agent Node (NEW) ---
 @observe()
-async def check_eligibility(state: AgentState) -> AgentState:
+def persist_data(state: AgentState) -> Dict[str, Any]:
     """
-    Prepares features and calls the ML service to get an eligibility prediction.
+    Saves the validated application data to PostgreSQL, Neo4j, and Qdrant.
     """
-    print(f"--- Running Eligibility Check for App ID: {state['application_id']} ---")
+    print(f"--- Running Data Persistence for App ID: {state['application_id']} ---")
     application_id = state["application_id"]
     validated_data = state.get("validated_data")
+    applicant_id = state["applicant_id"]
     errors = []
 
-    
-    if current_span:
-        current_span.input({"application_id": application_id, "validated_data_keys": list(validated_data.keys()) if validated_data else []})
+    if not validated_data:
+        error_msg = "Persistence failed: No validated data found."
+        print(error_msg)
+        langfuse.update_current_observation(level="ERROR", status_message=error_msg)
+        return {"error_message": error_msg}
+
+    # --- 1. Persist to PostgreSQL ---
+    pg_session = SessionLocal()
+    try:
+        with pg_session.begin(): # Use transaction block
+            db_application = pg_session.query(pg_models.Application).filter(pg_models.Application.id == application_id).with_for_update().first() # Lock row
+            if db_application:
+                db_application.validated_data = validated_data
+                db_applicant = pg_session.query(pg_models.Applicant).filter(pg_models.Applicant.id == applicant_id).first()
+                if db_applicant:
+                     # Update fields safely
+                     db_applicant.full_name = validated_data.get('full_name', db_applicant.full_name)
+                     db_applicant.email = validated_data.get('email', db_applicant.email)
+                     db_applicant.phone_number = validated_data.get('phone_number', db_applicant.phone_number)
+                print(f"Application {application_id} updated in PostgreSQL.")
+            else:
+                errors.append(f"Application {application_id} not found in PostgreSQL.")
+    except Exception as e:
+        error_msg = f"Error persisting to PostgreSQL: {str(e)}"
+        print(error_msg)
+        errors.append(error_msg)
+    finally:
+        pg_session.close()
+
+    # --- 2. Persist to Neo4j ---
+    if neo4j_driver: # Check if driver initialized correctly
+        try:
+            with neo4j_driver.session() as session:
+                # Use write_transaction for atomicity
+                session.write_transaction(update_neo4j_graph, validated_data, application_id)
+                print(f"Data for applicant {validated_data.get('emirates_id')} updated in Neo4j.")
+        except Exception as e:
+            error_msg = f"Error persisting to Neo4j: {str(e)}"
+            print(error_msg)
+            errors.append(error_msg)
+    else:
+        errors.append("Neo4j driver not available.")
+
+    # --- 3. Persist Embeddings to Qdrant ---
+    resume_text = validated_data.get("resume_text", "") # Placeholder - Need actual resume data
+    if resume_text and embedding_model and qdrant_client:
+        try:
+            vector = embedding_model.encode(resume_text).tolist()
+            qdrant_client.upsert(
+                collection_name=QDRANT_COLLECTION,
+                points=[
+                    models.PointStruct(
+                        id=application_id, vector=vector,
+                        payload={"applicant_id": applicant_id, "application_id": application_id}
+                    )
+                ],
+                wait=True
+            )
+            print(f"Resume embedding for application {application_id} saved to Qdrant.")
+        except Exception as e:
+            error_msg = f"Error saving embedding to Qdrant: {str(e)}"
+            print(error_msg)
+            errors.append(error_msg)
+    elif resume_text and not embedding_model:
+        errors.append("Resume text found but embedding model not loaded.")
+    elif resume_text and not qdrant_client:
+        errors.append("Resume text found but Qdrant client not available.")
+
+
+    # --- Prepare return state ---
+    if errors:
+        final_message = "Persistence finished with errors:\n" + "\n".join(errors)
+        print(final_message)
+        langfuse.update_current_observation(level="ERROR", status_message="Persistence Errors", output={"errors": errors})
+        # Keep previous error message if validation failed, otherwise use persistence errors
+        current_error = state.get("error_message")
+        return {"error_message": f"{current_error}\n{final_message}" if current_error else final_message}
+    else:
+        print("Persistence completed successfully.")
+        # Clear error if persistence succeeds
+        return {"error_message": None}
+
+# Helper Function for Neo4j Transaction
+def update_neo4j_graph(tx, validated_data, application_id):
+    # Applicant Node
+    tx.run("""
+        MERGE (p:Person {emiratesId: $emirates_id})
+        ON CREATE SET p.name = $name, p.applicationId = $app_id
+        ON MATCH SET p.name = $name, p.applicationId = $app_id
+        """,
+        emirates_id=validated_data.get('emirates_id'),
+        name=validated_data.get('full_name'),
+        app_id=application_id)
+
+    # Address Node and Relationship
+    if validated_data.get('address'):
+        tx.run("""
+            MERGE (a:Address {fullAddress: $address})
+            WITH a
+            MATCH (p:Person {emiratesId: $emirates_id})
+            MERGE (p)-[:LIVES_AT]->(a)
+            """,
+            address=validated_data.get('address'),
+            emirates_id=validated_data.get('emirates_id'))
+
+    # Family Member Nodes and Relationships
+    for member in validated_data.get('family_members', []):
+         if member.get('name') and member.get('relation'):
+             tx.run("""
+                 MERGE (fm:Person {name: $member_name}) // Simplistic merge
+                 WITH fm
+                 MATCH (applicant:Person {emiratesId: $applicant_id})
+                 MERGE (applicant)-[:HAS_FAMILY_MEMBER {relation: $relation}]->(fm)
+                 """,
+                 member_name=member['name'],
+                 applicant_id=validated_data.get('emirates_id'),
+                 relation=member['relation'])
+
+
+@observe()
+async def check_eligibility(state: AgentState) -> Dict[str, Any]:
+    """
+    Prepares features and calls the ML service for eligibility prediction.
+    """
+    print(f"--- Running Eligibility Check for App ID: {state['application_id']} ---")
+    validated_data = state.get("validated_data")
+    errors = []
 
     if not validated_data:
         error_msg = "Eligibility check failed: No validated data found."
         print(error_msg)
-        if current_span:
-            current_span.level="ERROR"; current_span.status_message = error_msg
-            current_span.output({"status": "failed", "errors": [error_msg]})
-        return {**state, "error_message": error_msg}
+        langfuse.update_current_observation(level="ERROR", status_message=error_msg)
+        return {"error_message": error_msg}
 
-    # --- 1. Prepare Features ---
-    # Extract features needed by the model from validated_data
-    # Use default values or handle missing data appropriately
+    # Prepare Features
     features = {
-        "income": validated_data.get("total_income", 0.0), # Default to 0 if missing
-        "family_size": len(validated_data.get("family_members", [])) + 1, # Applicant + members
-        # Add other features based on EXPECTED_FEATURES in serve_model.py
+        "income": validated_data.get("total_income", 0.0),
+        "family_size": len(validated_data.get("family_members", [])) + 1,
     }
     print(f"Prepared features: {features}")
 
-    # --- 2. Call ML Service ---
-    ml_service_url = "http://ml_service:8001/predict" # Use Docker service name
+    # Call ML Service
+    ml_service_url = "http://ml_service:8001/predict"
+    prediction_result = None
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=30.0) as client: # Add timeout
             response = await client.post(ml_service_url, json=features)
-            response.raise_for_status() # Raise exception for bad status codes (4xx or 5xx)
+            response.raise_for_status()
             prediction_result = response.json()
             print(f"ML Service Response: {prediction_result}")
 
-            eligibility_decision = prediction_result.get("decision", "Error")
-            eligibility_score = prediction_result.get("probability")
+            # Update observation output on success
+            langfuse.update_current_observation(output=prediction_result)
 
-            if current_span:
-                 current_span.output({"status": "success", "prediction": prediction_result})
-
-            # Update state with decision and score
             return {
-                **state,
-                "eligibility_decision": eligibility_decision,
-                "eligibility_score": eligibility_score,
-                "error_message": None # Clear previous errors if check is successful
+                "eligibility_decision": prediction_result.get("decision", "Error"),
+                "eligibility_score": prediction_result.get("probability"),
+                "error_message": None # Clear previous errors
             }
 
     except httpx.RequestError as e:
-        error_msg = f"Error calling ML service: {e}"
+        error_msg = f"Error calling ML service ({e.request.url}): {e}"
+        print(error_msg)
+        errors.append(error_msg)
+    except httpx.HTTPStatusError as e:
+        error_msg = f"ML service returned error status {e.response.status_code}: {e.response.text}"
         print(error_msg)
         errors.append(error_msg)
     except Exception as e:
@@ -483,214 +441,212 @@ async def check_eligibility(state: AgentState) -> AgentState:
         print(error_msg)
         errors.append(error_msg)
 
-    # --- Handle errors ---
+    # Handle errors
     final_error_message = "Eligibility check failed:\n" + "\n".join(errors)
-    if current_span:
-        current_span.level="ERROR"; current_span.status_message = "Eligibility Check Failed"
-        current_span.output({"status": "failed", "errors": errors})
+    langfuse.update_current_observation(level="ERROR", status_message="Eligibility Check Failed", output={"errors": errors})
     current_error = state.get("error_message")
-    return {**state, "error_message": f"{current_error}\n{final_error_message}" if current_error else final_error_message}
+    return {"error_message": f"{current_error}\n{final_error_message}" if current_error else final_error_message}
 
 
-# --- Recommendation Agent Node (NEW) ---
 @observe()
-async def generate_recommendation(state: AgentState) -> AgentState:
+async def generate_recommendation(state: AgentState) -> Dict[str, Any]:
     """
-    Generates financial and economic enablement recommendations based on eligibility.
-    Uses RAG for job/training matching if applicable.
+    Generates final recommendations using eligibility and RAG.
     """
     print(f"--- Generating Recommendation for App ID: {state['application_id']} ---")
     application_id = state["application_id"]
     applicant_id = state["applicant_id"]
     eligibility_decision = state.get("eligibility_decision")
     eligibility_score = state.get("eligibility_score")
-    validated_data = state.get("validated_data", {}) # Get validated data, default to empty dict
+    validated_data = state.get("validated_data", {})
     errors = []
 
-    
-    if current_span:
-        current_span.input({
-            "application_id": application_id,
-            "eligibility_decision": eligibility_decision,
-            "eligibility_score": eligibility_score
-        })
-
     if not eligibility_decision:
-        error_msg = "Recommendation failed: Eligibility decision not found in state."
+        error_msg = "Recommendation failed: Eligibility decision not found."
         print(error_msg)
-        # if current_span:
-        #     current_span.level="ERROR"; current_span.status_message = error_msg
-        #     current_span.output({"status": "failed", "errors": [error_msg]})
-        # Preserve previous errors if any
+        langfuse.update_current_observation(level="ERROR", status_message=error_msg)
         current_error = state.get("error_message")
-        return {**state, "error_message": f"{current_error}\n{error_msg}" if current_error else error_msg}
+        return {"error_message": f"{current_error}\n{error_msg}" if current_error else error_msg}
 
-    # --- 1. Financial Support Recommendation ---
+    # Financial Recommendation
     financial_recommendation = ""
+    score_str = f"(Score: {eligibility_score:.2f})" if eligibility_score is not None else ""
+    applicant_name = validated_data.get('full_name', 'Applicant')
+
     if eligibility_decision == "Approve":
-        # Basic approval message - could be enhanced with rules for amounts, etc.
-        financial_recommendation = f"Congratulations {validated_data.get('full_name', 'Applicant')}! Your application for financial support has been approved (Score: {eligibility_score:.2f}). Further details will be communicated separately."
+        financial_recommendation = f"Congratulations {applicant_name}! Your application for financial support has been approved {score_str}. Further details will follow."
     elif eligibility_decision == "Decline":
-        financial_recommendation = f"We regret to inform you {validated_data.get('full_name', 'Applicant')} that your application for financial support could not be approved at this time (Score: {eligibility_score:.2f}). However, we encourage you to explore the following economic enablement opportunities:"
-    else: # Handle Review or other states if added later
-         financial_recommendation = f"Your application (ID: {application_id}) requires further review. We will update you on the status soon."
-         # For review cases, maybe skip economic enablement for now
-        #  if current_span:
-        #      current_span.output({"status": "review_needed", "recommendation": financial_recommendation})
-         return {**state, "final_recommendation": financial_recommendation}
+        financial_recommendation = f"We regret to inform you {applicant_name} that your application for financial support could not be approved at this time {score_str}. Please see economic enablement options below:"
+    else:
+         financial_recommendation = f"Your application (ID: {application_id}) requires further review {score_str}. We will update you soon."
+         # Skip RAG if under review
+         return {"final_recommendation": financial_recommendation}
 
 
-    # --- 2. Economic Enablement Recommendation (using RAG) ---
+    # Economic Enablement (RAG)
     economic_recommendation = ""
-    # Placeholder: Assume resume text was extracted and embedded during persistence
-    # We need the vector ID used during persistence (we used application_id)
-    vector_id = application_id
+    vector_id = application_id # Using application_id as the Qdrant point ID
 
     if eligibility_decision in ["Approve", "Decline"] and embedding_model and qdrant_client:
-        print("Searching Qdrant for relevant economic enablement opportunities...")
-        rag_step = current_span.step(name="rag-economic-enablement") if current_span else None
+        print("Searching Qdrant for economic enablement opportunities...")
         try:
-            # --- Perform a vector search ---
-            # Search for vectors similar to the applicant's resume vector
-            # This requires having *other* vectors in Qdrant representing jobs/courses
-            # For V1, we will just search for the applicant's *own* vector as a placeholder proof-of-concept
-            # In V2, you'd populate Qdrant with job/course embeddings separately.
+             # Use context manager for the RAG step
+            with langfuse.get_current_observation().step(name="rag-economic-enablement", input={"vector_id_searched": vector_id}) as rag_step:
+                try:
+                    # V1: Retrieve the applicant's own vector/payload
+                    search_result = qdrant_client.retrieve(
+                        collection_name=QDRANT_COLLECTION,
+                        ids=[vector_id],
+                        with_payload=True,
+                        with_vectors=False
+                    )
 
-            search_result = qdrant_client.retrieve(
-                collection_name="applicant_resumes",
-                ids=[vector_id], # Retrieve the applicant's own data for now
-                with_payload=True,
-                with_vectors=False # Don't need the vector itself back
-            )
+                    if search_result:
+                        # V1 Placeholder: Just confirm retrieval
+                        economic_recommendation = "\n\nWe have identified potential economic enablement opportunities based on your profile (details would follow via LLM in V2)."
+                        print("Placeholder RAG search successful (retrieved own vector).")
+                        rag_step.output({"search_results_count": len(search_result), "placeholder_message": economic_recommendation})
+                        # V2: Here you would ideally search a DIFFERENT collection (jobs/courses)
+                        # using the applicant's vector as the query vector.
+                        # query_vector = embedding_model.encode(validated_data.get("resume_text","")).tolist()
+                        # hits = qdrant_client.search(collection_name="jobs_collection", query_vector=query_vector, limit=3)
+                        # Then format 'hits' using an LLM.
+                    else:
+                        economic_recommendation = "\n\nWe recommend exploring general resources."
+                        print("Applicant vector not found in Qdrant.")
+                        rag_step.output({"search_results_count": 0, "message": "Vector not found"})
 
-            if rag_step: rag_step.input({"vector_id": vector_id})
+                except Exception as e_rag:
+                    error_msg = f"Error during Qdrant search: {e_rag}"
+                    print(error_msg)
+                    errors.append(error_msg)
+                    economic_recommendation = "\n\nThere was an issue searching for opportunities."
+                    rag_step.level="ERROR"; rag_step.status_message=error_msg; rag_step.output({"error": error_msg})
 
-            if search_result:
-                # Placeholder: Use LLM to generate suggestions based on retrieved data
-                # For V1, we'll just acknowledge the search worked
-                economic_recommendation = "\n\nWe have identified potential economic enablement opportunities based on your profile (details would follow)."
-                print("Placeholder RAG search successful.")
-                if rag_step: rag_step.output({"search_results_count": len(search_result), "placeholder_message": economic_recommendation})
-            else:
-                 economic_recommendation = "\n\nWe recommend exploring general upskilling and job search resources available through the department."
-                 print("Applicant vector not found in Qdrant or RAG search failed.")
-                 if rag_step: rag_step.output({"search_results_count": 0, "message": "Vector not found"})
+        except Exception as e_step:
+            error_msg = f"Error setting up RAG step: {e_step}"
+            print(error_msg); errors.append(error_msg)
+            economic_recommendation = "\n\nIssue preparing opportunity search."
 
-
-        except Exception as e:
-            error_msg = f"Error during Qdrant search for economic enablement: {e}"
-            print(error_msg)
-            errors.append(error_msg)
-            economic_recommendation = "\n\nThere was an issue searching for tailored economic enablement opportunities."
-            if rag_step: rag_step.level="ERROR"; rag_step.status_message=error_msg; rag_step.output({"error": error_msg})
-        finally:
-             if rag_step: rag_step.end()
+    elif eligibility_decision in ["Approve", "Decline"]:
+         economic_recommendation = "\n\nEnablement search skipped (embedding model or Qdrant client unavailable)."
 
 
-    # --- 3. Combine Recommendations ---
+    # Combine and Finalize
     final_recommendation = financial_recommendation + economic_recommendation
 
-    # --- Update State ---
     if errors:
-        final_message = "Recommendation generation finished with errors:\n" + "\n".join(errors)
+        final_message = "Recommendation generation finished with RAG errors:\n" + "\n".join(errors)
         print(final_message)
-        # if current_span:
-        #     current_span.level="WARNING"; current_span.status_message = "Recommendation Errors (RAG)"
-        #     current_span.output({"status": "partial_success", "errors": errors, "recommendation": final_recommendation})
+        langfuse.update_current_observation(level="WARNING", status_message="Recommendation Errors (RAG)", output={"recommendation": final_recommendation, "errors": errors})
         current_error = state.get("error_message")
-        return {**state, "final_recommendation": final_recommendation, "error_message": f"{current_error}\n{final_message}" if current_error else final_message}
+        # Still return the recommendation, but include errors
+        return {"final_recommendation": final_recommendation, "error_message": f"{current_error}\n{final_message}" if current_error else final_message}
     else:
         print("Recommendation generated successfully.")
-        if current_span:
-             current_span.output({"status": "success", "recommendation": final_recommendation})
-        # Clear error state if recommendation was successful after eligibility check
-        return {**state, "final_recommendation": final_recommendation, "error_message": None}
+        # @observe logs return value automatically
+        return {"final_recommendation": final_recommendation, "error_message": None} # Clear errors
 
 
-# --- Update Workflow Graph Definition ---
+# ==================================
+# == Graph Definition ==
+# ==================================
+
 workflow = StateGraph(AgentState)
 
-# Define the nodes
+# --- Add Nodes ---
 workflow.add_node("extract_data", run_data_extraction)
-workflow.add_node("validate_data", run_data_validation) # Add the new node
+workflow.add_node("validate_data", run_data_validation)
 workflow.add_node("persist_data", persist_data)
-workflow.add_node("check_eligibility", check_eligibility) # Add eligibility check node
-workflow.add_node("generate_recommendation", generate_recommendation) # <-- Add new node for recommendation
+workflow.add_node("check_eligibility", check_eligibility)
+workflow.add_node("generate_recommendation", generate_recommendation)
 
-# Define the entry point
+# --- Set Entry Point ---
 workflow.set_entry_point("extract_data")
 
-# Define edges
-# After extraction, decide where to go based on errors
+# --- Define Edges ---
+
+# After Extraction
 def decide_after_extraction(state: AgentState) -> str:
-    if state.get("error_message") and not state.get("extracted_data"): # Major extraction failure
-        print("Extraction failed critically. Ending workflow.")
+    # Check if 'extracted_data' exists and is not empty, AND if there's an error message
+    has_data = bool(state.get("extracted_data"))
+    has_error = bool(state.get("error_message"))
+
+    if not has_data and has_error:
+        print("Decision: Extraction failed critically. Ending.")
         return "end_workflow"
-    elif state.get("error_message"): # Partial extraction success
-        print("Extraction had errors, proceeding to validation with partial data.")
-        return "validate_data"
-    else:
-        print("Extraction successful. Proceeding to validation.")
+    # Proceed to validation even if there were partial errors but some data was extracted
+    else: # Covers (has_data and has_error) OR (has_data and not has_error) OR (not has_data and not has_error - unlikely)
+        print("Decision: Proceeding to validation.")
         return "validate_data"
 
 workflow.add_conditional_edges(
     "extract_data",
     decide_after_extraction,
-    {
-        "validate_data": "validate_data",
-        "end_workflow": END
-    }
+    {"validate_data": "validate_data", "end_workflow": END}
 )
 
-
-
-# Edges after validation
+# After Validation
 def decide_after_validation(state: AgentState) -> str:
-    if state.get("error_message"):
-        print("Validation failed. Ending workflow.")
-        # Optionally, still try to persist the (partially) validated data for logging/review
-        # return "persist_data" # Uncomment to persist even on validation failure
-        return "end_workflow" # End immediately on validation failure
+    # Error message specifically set by the validation node indicates failure
+    validation_failed = "Validation Failed" in state.get("error_message", "")
+
+    if validation_failed:
+        print("Decision: Validation failed. Ending.")
+        return "end_workflow" # Stop if core validation fails
     else:
-        print("Validation successful. Proceeding to persistence.")
-        return "persist_data" # <-- Go to persist_data on success
+        print("Decision: Validation successful. Proceeding to persistence.")
+        return "persist_data"
 
 workflow.add_conditional_edges(
     "validate_data",
     decide_after_validation,
-    {
-        "persist_data": "persist_data", # <-- New success path
-        "end_workflow": END
-    }
+    {"persist_data": "persist_data", "end_workflow": END}
 )
 
-# Edge after persistence -> Go to eligibility check
+# After Persistence
+def decide_after_persistence(state: AgentState) -> str:
+    # Error message specifically set by the persistence node indicates failure
+    persistence_failed = "Persistence finished with errors" in state.get("error_message", "")
+
+    if persistence_failed:
+        print("Decision: Persistence failed. Ending.")
+        return "end_workflow" # Stop if critical data couldn't be saved
+    else:
+        print("Decision: Persistence successful. Proceeding to eligibility check.")
+        return "check_eligibility"
+
 workflow.add_conditional_edges(
     "persist_data",
-    lambda state: "error" if state.get("error_message") else "success",
-    {
-        "success": "check_eligibility", # <-- Go to eligibility on success
-        "error": END # End if persistence failed
-    }
+    decide_after_persistence,
+    {"check_eligibility": "check_eligibility", "end_workflow": END}
 )
 
-# Edge after eligibility check -> Go to recommendation
+# After Eligibility Check
+def decide_after_eligibility(state: AgentState) -> str:
+    # Error message specifically set by the eligibility node indicates failure
+    eligibility_failed = "Eligibility check failed" in state.get("error_message", "")
+
+    if eligibility_failed:
+        print("Decision: Eligibility check failed. Ending.")
+        return "end_workflow"
+    else:
+        print("Decision: Eligibility check successful. Proceeding to recommendation.")
+        return "generate_recommendation"
+
 workflow.add_conditional_edges(
     "check_eligibility",
-    lambda state: "generate_recommendation" if not state.get("error_message") else END,
-    {
-        "generate_recommendation": "generate_recommendation", # <-- Go to recommendation on success
-        END: END
-    }
+    decide_after_eligibility,
+    {"generate_recommendation": "generate_recommendation", "end_workflow": END}
 )
 
-# Edge after persistence
-# For now, end the workflow after attempting persistence
+# After Recommendation Generation - Always End
 workflow.add_edge("generate_recommendation", END)
 
-# Compile the graph
-app_graph = workflow.compile()
-
-# --- Ensure all imports are present ---
-import datetime # Should be at the top already
-from storage import models # Import your SQLAlchemy models for Postgres query
+# --- Compile Graph ---
+try:
+    app_graph = workflow.compile()
+    print("LangGraph workflow compiled successfully.")
+except Exception as e:
+    print(f"Error compiling LangGraph workflow: {e}")
+    app_graph = None # Set to None on failure
